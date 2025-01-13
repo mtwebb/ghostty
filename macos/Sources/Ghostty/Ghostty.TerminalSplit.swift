@@ -80,6 +80,7 @@ extension Ghostty {
                     }
                 }
                 .navigationTitle(surfaceTitle ?? "Ghostty")
+                .background(.regularMaterial)
                 .id(node) // Needed for change detection on node
             } else {
                 // On these events we want to reset the split state and call it.
