@@ -645,6 +645,20 @@ palette: Palette = .{},
 /// Specified as either hex (`#RRGGBB` or `RRGGBB`) or a named X11 color.
 @"unfocused-split-fill": ?Color = null,
 
+/// The Apple Material to use.  These materials feature are larger blur kernel
+/// radius that what is possible with the background-blur-radius. It still uses
+/// that code pathway so set background-blur-radius to 0 and background-opacity
+/// to 0. Currently this material is not applied to the titlebar or tab bar,
+/// so consider setting macos-titlebar-style = hidden
+/// acceptable values are:
+///    - ultraThin
+///    - thin
+///    - regular
+///    - thick
+///    - ultraThick
+///    - null (disables use)
+@"macos-material": ?String = null,
+
 /// The color of the split divider. If this is not set, a default will be chosen.
 /// Specified as either hex (`#RRGGBB` or `RRGGBB`) or a named X11 color.
 @"split-divider-color": ?Color = null,

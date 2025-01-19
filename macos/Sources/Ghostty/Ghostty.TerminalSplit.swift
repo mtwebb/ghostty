@@ -51,7 +51,27 @@ extension Ghostty {
             let center = NotificationCenter.default
             let pubZoom = center.publisher(for: Notification.didToggleSplitZoom)
             let pubEqualize = center.publisher(for: Notification.didEqualizeSplits)
-
+            
+           
+            // If using Apple Materials grab the one to use from config
+            // If not specified will use clear to pass through
+            var material: ghostty.config.macosMaterial
+            switch(material) {
+            case "ultraThin":
+                material = .regularMaterial
+            case "thin":
+                material = .thinMaterial
+            case "regular":
+                material = .regularMaterial
+            case "thick":
+                material = .thickMaterial
+            case "ultraThick":
+                material = .ultraThickMaterial
+            case "":
+                material = .clear
+            case material:
+                material = .clear
+            }
             // If we're zoomed, we don't render anything, we are transparent. This
             // ensures that the View stays around so we don't lose our state, but
             // also that the zoomed view on top can see through if background transparency
@@ -80,8 +100,9 @@ extension Ghostty {
                     }
                 }
                 .navigationTitle(surfaceTitle ?? "Ghostty")
-                .background(.regularMaterial)
                 .id(node) // Needed for change detection on node
+                //.background(.regularMaterial)
+                .background(material)
             } else {
                 // On these events we want to reset the split state and call it.
                 let pubSplit = center.publisher(for: Notification.ghosttyNewSplit, object: zoomedSurface!)

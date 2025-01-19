@@ -357,7 +357,31 @@ extension Ghostty {
             _ = ghostty_config_get(config, &opacity, key, UInt(key.count))
             return 1 - opacity
         }
-
+        
+        var macosMaterial: Material {
+            guard let config = self.config else { return Material.regularMaterial }
+            var material: String = ""
+            let key = "macos-material"
+            _ = ghostty_config_get(config, &material, key, UInt(key.count))
+            
+            var macos_material: Material = Material.regularMaterial
+            switch(material) {
+            case "ultraThin":
+                macos_material = Material.ultraThinMaterial
+            case "thin":
+                macos_material = Material.thinMaterial
+            case "regular":
+                macos_material = Material.regularMaterial
+            case "thick":
+                macos_material = Material.thickMaterial
+            case "ultraThick":
+                macos_material = Material.ultraThickMaterial
+            default :
+                macos_material = Material.regularMaterial
+            }
+            return macos_material
+        }
+        
         var unfocusedSplitFill: Color {
             guard let config = self.config else { return .white }
 
