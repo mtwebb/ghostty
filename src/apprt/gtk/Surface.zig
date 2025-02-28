@@ -4,6 +4,11 @@
 const Surface = @This();
 
 const std = @import("std");
+const adw = @import("adw");
+const gtk = @import("gtk");
+const gio = @import("gio");
+const gobject = @import("gobject");
+
 const Allocator = std.mem.Allocator;
 const build_config = @import("../../build_config.zig");
 const build_options = @import("build_options");
@@ -20,11 +25,14 @@ const App = @import("App.zig");
 const Split = @import("Split.zig");
 const Tab = @import("Tab.zig");
 const Window = @import("Window.zig");
+const Menu = @import("menu.zig").Menu;
 const ClipboardConfirmationWindow = @import("ClipboardConfirmationWindow.zig");
 const ResizeOverlay = @import("ResizeOverlay.zig");
 const inspector = @import("inspector.zig");
 const gtk_key = @import("key.zig");
 const c = @import("c.zig").c;
+const Builder = @import("Builder.zig");
+const adwaita = @import("adwaita.zig");
 
 const log = std.log.scoped(.gtk_surface);
 
@@ -266,8 +274,8 @@ pub const URLWidget = struct {
         );
 
         // Show it
-        c.gtk_overlay_add_overlay(@ptrCast(surface.overlay), left);
-        c.gtk_overlay_add_overlay(@ptrCast(surface.overlay), right);
+        c.gtk_overlay_add_overlay(surface.overlay, left);
+        c.gtk_overlay_add_overlay(surface.overlay, right);
 
         return .{
             .left = left,
@@ -276,8 +284,8 @@ pub const URLWidget = struct {
     }
 
     pub fn deinit(self: *URLWidget, overlay: *c.GtkOverlay) void {
-        c.gtk_overlay_remove_overlay(@ptrCast(overlay), @ptrCast(self.left));
-        c.gtk_overlay_remove_overlay(@ptrCast(overlay), @ptrCast(self.right));
+        c.gtk_overlay_remove_overlay(overlay, @ptrCast(self.left));
+        c.gtk_overlay_remove_overlay(overlay, @ptrCast(self.right));
     }
 
     pub fn setText(self: *const URLWidget, str: [:0]const u8) void {
@@ -329,7 +337,7 @@ gl_area: *c.GtkGLArea,
 url_widget: ?URLWidget = null,
 
 /// The overlay that shows resizing information.
-resize_overlay: ResizeOverlay = .{},
+resize_overlay: ResizeOverlay = undefined,
 
 /// Whether or not the current surface is zoomed in (see `toggle_split_zoom`).
 zoomed_in: bool = false,
@@ -345,6 +353,12 @@ cursor: ?*c.GdkCursor = null,
 /// When set the text in this buf will be null-terminated, because we need to
 /// pass it to GTK.
 title_text: ?[:0]const u8 = null,
+
+/// The title of the surface as reported by the terminal. If it is null, the
+/// title reported by the terminal is currently being used. If the title was
+/// manually overridden by the user, this will be set to a non-null value
+/// representing the default terminal title.
+title_from_terminal: ?[:0]const u8 = null,
 
 /// Our current working directory. We use this value for setting tooltips in
 /// the headerbar subtitle if we have focus. When set, the text in this buf
@@ -368,7 +382,7 @@ cursor_pos: apprt.CursorPos,
 inspector: ?*inspector.Inspector = null,
 
 /// Key input states. See gtkKeyPressed for detailed descriptions.
-in_keyevent: bool = false,
+in_keyevent: IMKeyEvent = .false,
 im_context: *c.GtkIMContext,
 im_composing: bool = false,
 im_buf: [128]u8 = undefined,
@@ -377,6 +391,23 @@ im_len: u7 = 0,
 /// The surface-specific cgroup path. See App.transient_cgroup_path for
 /// details on what this is.
 cgroup_path: ?[]const u8 = null,
+
+/// Our context menu.
+context_menu: Menu(Surface, "context_menu", false),
+
+/// The state of the key event while we're doing IM composition.
+/// See gtkKeyPressed for detailed descriptions.
+pub const IMKeyEvent = enum {
+    /// Not in a key event.
+    false,
+
+    /// In a key event but im_composing was either true or false
+    /// prior to the calling IME processing. This is important to
+    /// work around different input methods calling commit and
+    /// preedit end in a different order.
+    composing,
+    not_composing,
+};
 
 /// Configuration used for initializing the surface. We have to copy some
 /// data since initialization is delayed with GTK (on realize).
@@ -553,7 +584,7 @@ pub fn init(self: *Surface, app: *App, opts: Options) !void {
         .container = .{ .none = {} },
         .overlay = @ptrCast(overlay),
         .gl_area = @ptrCast(gl_area),
-        .resize_overlay = ResizeOverlay.init(self),
+        .resize_overlay = undefined,
         .title_text = null,
         .core_surface = undefined,
         .font_size = font_size,
@@ -562,8 +593,16 @@ pub fn init(self: *Surface, app: *App, opts: Options) !void {
         .cursor_pos = .{ .x = -1, .y = -1 },
         .im_context = im_context,
         .cgroup_path = cgroup_path,
+        .context_menu = undefined,
     };
     errdefer self.* = undefined;
+
+    // initialize the context menu
+    self.context_menu.init(self);
+    self.context_menu.setParent(@ptrCast(@alignCast(overlay)));
+
+    // initialize the resize overlay
+    self.resize_overlay.init(self, &app.config);
 
     // Set our default mouse shape
     try self.setMouseShape(.text);
@@ -640,6 +679,7 @@ fn realize(self: *Surface) !void {
 pub fn deinit(self: *Surface) void {
     self.init_config.deinit(self.app.core_app.alloc);
     if (self.title_text) |title| self.app.core_app.alloc.free(title);
+    if (self.title_from_terminal) |title| self.app.core_app.alloc.free(title);
     if (self.pwd) |pwd| self.app.core_app.alloc.free(pwd);
 
     // We don't allocate anything if we aren't realized.
@@ -666,6 +706,11 @@ pub fn deinit(self: *Surface) void {
     if (self.cursor) |cursor| c.g_object_unref(cursor);
     if (self.update_title_timer) |timer| _ = c.g_source_remove(timer);
     self.resize_overlay.deinit();
+}
+
+/// Update our local copy of any configuration that we use.
+pub fn updateConfig(self: *Surface, config: *const configpkg.Config) !void {
+    self.resize_overlay.updateConfig(config);
 }
 
 // unref removes the long-held reference to the gl_area and kicks off the
@@ -803,28 +848,44 @@ pub fn shouldClose(self: *const Surface) bool {
 }
 
 pub fn getContentScale(self: *const Surface) !apprt.ContentScale {
-    // Future: detect GTK version 4.12+ and use gdk_surface_get_scale so we
-    // can support fractional scaling.
-    const gtk_scale: f32 = @floatFromInt(c.gtk_widget_get_scale_factor(@ptrCast(self.gl_area)));
+    const gtk_scale: f32 = scale: {
+        const widget: *gtk.Widget = @ptrCast(@alignCast(self.gl_area));
+        // Future: detect GTK version 4.12+ and use gdk_surface_get_scale so we
+        // can support fractional scaling.
+        const scale = widget.getScaleFactor();
+        if (scale <= 0) {
+            log.warn("gtk_widget_get_scale_factor returned a non-positive number: {}", .{scale});
+            break :scale 1.0;
+        }
+        break :scale @floatFromInt(scale);
+    };
 
     // Also scale using font-specific DPI, which is often exposed to the user
     // via DE accessibility settings (see https://docs.gtk.org/gtk4/class.Settings.html).
     const xft_dpi_scale = xft_scale: {
         // gtk-xft-dpi is font DPI multiplied by 1024. See
         // https://docs.gtk.org/gtk4/property.Settings.gtk-xft-dpi.html
-        const settings = c.gtk_settings_get_default();
+        const settings = gtk.Settings.getDefault() orelse break :xft_scale 1.0;
+        var value = std.mem.zeroes(gobject.Value);
+        defer value.unset();
+        _ = value.init(gobject.ext.typeFor(c_int));
+        settings.as(gobject.Object).getProperty("gtk-xft-dpi", &value);
+        const gtk_xft_dpi = value.getInt();
 
-        var value: c.GValue = std.mem.zeroes(c.GValue);
-        defer c.g_value_unset(&value);
-        _ = c.g_value_init(&value, c.G_TYPE_INT);
-        c.g_object_get_property(@ptrCast(@alignCast(settings)), "gtk-xft-dpi", &value);
-        const gtk_xft_dpi = c.g_value_get_int(&value);
+        // Use a value of 1.0 for the XFT DPI scale if the setting is <= 0
+        // See:
+        // https://gitlab.gnome.org/GNOME/libadwaita/-/commit/a7738a4d269bfdf4d8d5429ca73ccdd9b2450421
+        // https://gitlab.gnome.org/GNOME/libadwaita/-/commit/9759d3fd81129608dd78116001928f2aed974ead
+        if (gtk_xft_dpi <= 0) {
+            log.warn("gtk-xft-dpi was not set, using default value", .{});
+            break :xft_scale 1.0;
+        }
 
         // As noted above gtk-xft-dpi is multiplied by 1024, so we divide by
         // 1024, then divide by the default value (96) to derive a scale. Note
         // gtk-xft-dpi can be fractional, so we use floating point math here.
-        const xft_dpi: f32 = @as(f32, @floatFromInt(gtk_xft_dpi)) / 1024;
-        break :xft_scale xft_dpi / 96;
+        const xft_dpi: f32 = @as(f32, @floatFromInt(gtk_xft_dpi)) / 1024.0;
+        break :xft_scale xft_dpi / 96.0;
     };
 
     const scale = gtk_scale * xft_dpi_scale;
@@ -899,7 +960,7 @@ fn updateTitleLabels(self: *Surface) void {
 
     // If we have a tab and are the focused child, then we have to update the tab
     if (self.container.tab()) |tab| {
-        if (tab.focus_child == self) tab.setLabelText(title);
+        if (tab.focus_child == self) tab.setTitleText(title);
     }
 
     // If we have a window and are focused, then we have to update the window title.
@@ -917,8 +978,9 @@ fn updateTitleLabels(self: *Surface) void {
 }
 
 const zoom_title_prefix = "🔍 ";
+pub const SetTitleSource = enum { user, terminal };
 
-pub fn setTitle(self: *Surface, slice: [:0]const u8) !void {
+pub fn setTitle(self: *Surface, slice: [:0]const u8, source: SetTitleSource) !void {
     const alloc = self.app.core_app.alloc;
 
     // Always allocate with the "🔍 " at the beginning and slice accordingly
@@ -930,6 +992,14 @@ pub fn setTitle(self: *Surface, slice: [:0]const u8) !void {
         break :copy new_title;
     };
     errdefer alloc.free(copy);
+
+    // The user has overridden the title
+    // We only want to update the terminal provided title so that it can be restored to the most recent state.
+    if (self.title_from_terminal != null and source == .terminal) {
+        alloc.free(self.title_from_terminal.?);
+        self.title_from_terminal = copy;
+        return;
+    }
 
     if (self.title_text) |old| alloc.free(old);
     self.title_text = copy;
@@ -955,13 +1025,39 @@ fn updateTitleTimerExpired(ctx: ?*anyopaque) callconv(.C) c.gboolean {
 
 pub fn getTitle(self: *Surface) ?[:0]const u8 {
     if (self.title_text) |title_text| {
-        return if (self.zoomed_in)
-            title_text
-        else
-            title_text[zoom_title_prefix.len..];
+        return self.resolveTitle(title_text);
     }
 
     return null;
+}
+
+pub fn getTerminalTitle(self: *Surface) ?[:0]const u8 {
+    if (self.title_from_terminal) |title_text| {
+        return self.resolveTitle(title_text);
+    }
+
+    return null;
+}
+
+fn resolveTitle(self: *Surface, title: [:0]const u8) [:0]const u8 {
+    return if (self.zoomed_in)
+        title
+    else
+        title[zoom_title_prefix.len..];
+}
+
+pub fn promptTitle(self: *Surface) !void {
+    if (!adwaita.versionAtLeast(1, 5, 0)) return;
+    const window = self.container.window() orelse return;
+
+    var builder = Builder.init("prompt-title-dialog", 1, 5, .blp);
+    defer builder.deinit();
+
+    const entry = builder.getObject(gtk.Entry, "title_entry").?;
+    entry.getBuffer().setText(self.getTitle() orelse "", -1);
+
+    const dialog = builder.getObject(adw.AlertDialog, "prompt_title_dialog").?;
+    dialog.choose(@ptrCast(window.window), null, gtkPromptTitleResponse, self);
 }
 
 /// Set the current working directory of the surface.
@@ -1210,6 +1306,7 @@ fn getClipboard(widget: *c.GtkWidget, clipboard: apprt.Clipboard) ?*c.GdkClipboa
         .selection, .primary => c.gtk_widget_get_primary_clipboard(widget),
     };
 }
+
 pub fn getCursorPos(self: *const Surface) !apprt.CursorPos {
     return self.cursor_pos;
 }
@@ -1245,38 +1342,6 @@ pub fn showDesktopNotification(
     // We set the notification ID to the body content. If the content is the
     // same, this notification may replace a previous notification
     c.g_application_send_notification(g_app, body.ptr, notification);
-}
-
-fn showContextMenu(self: *Surface, x: f32, y: f32) void {
-    const window: *Window = self.container.window() orelse {
-        log.info(
-            "showContextMenu invalid for container={s}",
-            .{@tagName(self.container)},
-        );
-        return;
-    };
-
-    var point: c.graphene_point_t = .{ .x = x, .y = y };
-    if (c.gtk_widget_compute_point(
-        self.primaryWidget(),
-        @ptrCast(window.window),
-        &c.GRAPHENE_POINT_INIT(point.x, point.y),
-        @ptrCast(&point),
-    ) == 0) {
-        log.warn("failed computing point for context menu", .{});
-        return;
-    }
-
-    const rect: c.GdkRectangle = .{
-        .x = @intFromFloat(point.x),
-        .y = @intFromFloat(point.y),
-        .width = 1,
-        .height = 1,
-    };
-
-    c.gtk_popover_set_pointing_to(@ptrCast(@alignCast(window.context_menu)), &rect);
-    self.app.refreshContextMenu(window.window, self.core_surface.hasSelection());
-    c.gtk_popover_popup(@ptrCast(@alignCast(window.context_menu)));
 }
 
 fn gtkRealize(area: *c.GtkGLArea, ud: ?*anyopaque) callconv(.C) void {
@@ -1449,7 +1514,7 @@ fn gtkMouseDown(
     // word and returns false. We can use this to handle the context menu
     // opening under normal scenarios.
     if (!consumed and button == .right) {
-        self.showContextMenu(@floatCast(x), @floatCast(y));
+        self.context_menu.popupAt(@intFromFloat(x), @intFromFloat(y));
     }
 }
 
@@ -1658,16 +1723,29 @@ pub fn keyEvent(
             .height = 1,
         });
 
-        // Pass the event through the IM controller. This will return true
-        // if the input method handled the event.
+        // We note that we're in a keypress because we want some logic to
+        // depend on this. For example, we don't want to send character events
+        // like "a" via the input "commit" event if we're actively processing
+        // a keypress because we'd lose access to the keycode information.
         //
+        // We have to maintain some additional state here of whether we
+        // were composing because different input methods call the callbacks
+        // in different orders. For example, ibus calls commit THEN preedit
+        // end but simple calls preedit end THEN commit.
+        self.in_keyevent = if (self.im_composing) .composing else .not_composing;
+        defer self.in_keyevent = .false;
+
+        // Pass the event through the input method which returns true if handled.
         // Confusingly, not all events handled by the input method result
-        // in this returning true so we have to maintain some local state to
-        // find those and in one case we simply lose information.
+        // in this returning true so we have to maintain some additional
+        // state about whether we were composing or not to determine if
+        // we should proceed with key encoding.
+        //
+        // Cases where the input method does not mark the event as handled:
         //
         // - If we change the input method via keypress while we have preedit
         //   text, the input method will commit the pending text but will not
-        //   mark it as handled. We use the `was_composing` variable to detect
+        //   mark it as handled. We use the `.composing` state to detect
         //   this case.
         //
         // - If we switch input methods (i.e. via ctrl+shift with fcitx),
@@ -1678,19 +1756,10 @@ pub fn keyEvent(
         //   triggered despite being technically consumed. At the time of
         //   writing, both Kitty and Alacritty have the same behavior. I
         //   know of no way to fix this.
-        const was_composing = self.im_composing;
-        const im_handled = filter: {
-            // We note that we're in a keypress because we want some logic to
-            // depend on this. For example, we don't want to send character events
-            // like "a" via the input "commit" event if we're actively processing
-            // a keypress because we'd lose access to the keycode information.
-            self.in_keyevent = true;
-            defer self.in_keyevent = false;
-            break :filter c.gtk_im_context_filter_keypress(
-                self.im_context,
-                event,
-            ) != 0;
-        };
+        const im_handled = c.gtk_im_context_filter_keypress(
+            self.im_context,
+            event,
+        ) != 0;
         // log.warn("GTKIM: im_handled={} im_len={} im_composing={}", .{
         //     im_handled,
         //     self.im_len,
@@ -1713,7 +1782,7 @@ pub fn keyEvent(
             // Example: enable Japanese input method, press "konn" and then
             // press enter. The final enter should not be encoded and "konn"
             // (in hiragana) should be written as "こん".
-            if (was_composing) return true;
+            if (self.in_keyevent == .composing) return true;
 
             // Not composing and our input method buffer is empty. This could
             // mean that the input method reacted to this event by activating
@@ -1892,7 +1961,6 @@ fn gtkInputPreeditChanged(
     ctx: *c.GtkIMContext,
     ud: ?*anyopaque,
 ) callconv(.C) void {
-    // log.warn("GTKIM: preedit change", .{});
     const self = userdataSelf(ud.?);
 
     // Get our pre-edit string that we'll use to show the user.
@@ -1902,6 +1970,7 @@ fn gtkInputPreeditChanged(
     const str = std.mem.sliceTo(buf, 0);
 
     // Update our preedit state in Ghostty core
+    // log.warn("GTKIM: preedit change str={s}", .{str});
     self.core_surface.preeditCallback(str) catch |err| {
         log.err("error in preedit callback err={}", .{err});
     };
@@ -1928,26 +1997,48 @@ fn gtkInputCommit(
     bytes: [*:0]u8,
     ud: ?*anyopaque,
 ) callconv(.C) void {
-    // log.warn("GTKIM: input commit", .{});
     const self = userdataSelf(ud.?);
     const str = std.mem.sliceTo(bytes, 0);
 
-    // If we're in a keyEvent (i.e. a keyboard event) and we're not composing,
-    // then this is just a normal key press resulting in UTF-8 text. We
-    // want the keyEvent to handle this so that the UTF-8 text can be associated
-    // with a keyboard event.
-    if (!self.im_composing and self.in_keyevent) {
-        if (str.len > self.im_buf.len) {
-            log.warn("not enough buffer space for input method commit", .{});
+    // log.debug("GTKIM: input commit composing={} keyevent={} str={s}", .{
+    //     self.im_composing,
+    //     self.in_keyevent,
+    //     str,
+    // });
+
+    // We need to handle commit specially if we're in a key event.
+    // Specifically, GTK will send us a commit event for basic key
+    // encodings like "a" (on a US layout keyboard). We don't want
+    // to treat this as IME committed text because we want to associate
+    // it with a key event (i.e. "a" key press).
+    switch (self.in_keyevent) {
+        // If we're not in a key event then this commit is from
+        // some other source (i.e. on-screen keyboard, tablet, etc.)
+        // and we want to commit the text to the core surface.
+        .false => {},
+
+        // If we're in a composing state and in a key event then this
+        // key event is resulting in a commit of multiple keypresses
+        // and we don't want to encode it alongside the keypress.
+        .composing => {},
+
+        // If we're not composing then this commit is just a normal
+        // key encoding and we want our key event to handle it so
+        // that Ghostty can be aware of the key event alongside
+        // the text.
+        .not_composing => {
+            if (str.len > self.im_buf.len) {
+                log.warn("not enough buffer space for input method commit", .{});
+                return;
+            }
+
+            // Copy our committed text to the buffer
+            @memcpy(self.im_buf[0..str.len], str);
+            self.im_len = @intCast(str.len);
+
+            // log.debug("input commit len={}", .{self.im_len});
             return;
-        }
-
-        // Copy our committed text to the buffer
-        @memcpy(self.im_buf[0..str.len], str);
-        self.im_len = @intCast(str.len);
-
-        // log.debug("input commit len={}", .{self.im_len});
-        return;
+        },
     }
 
     // If we reach this point from above it means we're composing OR
@@ -2031,15 +2122,14 @@ fn gtkFocusLeave(_: *c.GtkEventControllerFocus, ud: ?*anyopaque) callconv(.C) vo
 /// Adds the unfocused_widget to the overlay. If the unfocused_widget has already been added, this
 /// is a no-op
 pub fn dimSurface(self: *Surface) void {
-    const window = self.container.window() orelse {
+    _ = self.container.window() orelse {
         log.warn("dimSurface invalid for container={}", .{self.container});
         return;
     };
 
     // Don't dim surface if context menu is open.
     // This means we got unfocused due to it opening.
-    const context_menu_open = c.gtk_widget_get_visible(window.context_menu);
-    if (context_menu_open == 1) return;
+    if (self.context_menu.isVisible()) return;
 
     if (self.unfocused_widget != null) return;
     self.unfocused_widget = c.gtk_drawing_area_new();
@@ -2084,7 +2174,7 @@ pub fn present(self: *Surface) void {
     if (self.container.window()) |window| {
         if (self.container.tab()) |tab| {
             if (window.notebook.getTabPosition(tab)) |position|
-                window.notebook.gotoNthTab(position);
+                _ = window.notebook.gotoNthTab(position);
         }
         c.gtk_window_present(window.window);
     }
@@ -2212,6 +2302,41 @@ fn doPaste(self: *Surface, data: [:0]const u8) void {
     };
 }
 
+pub fn defaultTermioEnv(self: *Surface) !std.process.EnvMap {
+    const alloc = self.app.core_app.alloc;
+    var env = try internal_os.getEnvMap(alloc);
+    errdefer env.deinit();
+
+    // Don't leak these GTK environment variables to child processes.
+    env.remove("GDK_DEBUG");
+    env.remove("GDK_DISABLE");
+    env.remove("GSK_RENDERER");
+
+    // Unset environment varies set by snaps if we're running in a snap.
+    // This allows Ghostty to further launch additional snaps.
+    if (env.get("SNAP")) |_| {
+        env.remove("SNAP");
+        env.remove("DRIRC_CONFIGDIR");
+        env.remove("__EGL_EXTERNAL_PLATFORM_CONFIG_DIRS");
+        env.remove("__EGL_VENDOR_LIBRARY_DIRS");
+        env.remove("LD_LIBRARY_PATH");
+        env.remove("LIBGL_DRIVERS_PATH");
+        env.remove("LIBVA_DRIVERS_PATH");
+        env.remove("VK_LAYER_PATH");
+        env.remove("XLOCALEDIR");
+        env.remove("GDK_PIXBUF_MODULEDIR");
+        env.remove("GTK_PATH");
+    }
+
+    if (self.container.window()) |window| {
+        // On some window protocols we might want to add specific
+        // environment variables to subprocesses, such as WINDOWID on X11.
+        try window.winproto.addSubprocessEnv(&env);
+    }
+
+    return env;
+}
+
 /// Check a GValue to see what's type its wrapping. This is equivalent to GTK's
 /// `G_VALUE_HOLDS` macro but Zig's C translator does not like it.
 fn g_value_holds(value_: ?*c.GValue, g_type: c.GType) bool {
@@ -2220,4 +2345,41 @@ fn g_value_holds(value_: ?*c.GValue, g_type: c.GType) bool {
         return c.g_type_check_value_holds(value, g_type) != 0;
     }
     return false;
+}
+
+fn gtkPromptTitleResponse(source_object: ?*gobject.Object, result: *gio.AsyncResult, ud: ?*anyopaque) callconv(.C) void {
+    if (!adwaita.versionAtLeast(1, 5, 0)) return;
+    const dialog = gobject.ext.cast(adw.AlertDialog, source_object.?).?;
+    const self = userdataSelf(ud orelse return);
+
+    const response = dialog.chooseFinish(result);
+    if (std.mem.orderZ(u8, "ok", response) == .eq) {
+        const title_entry = gobject.ext.cast(gtk.Entry, dialog.getExtraChild().?).?;
+        const title = std.mem.span(title_entry.getBuffer().getText());
+
+        // if the new title is empty and the user has set the title previously, restore the terminal provided title
+        if (title.len == 0) {
+            if (self.getTerminalTitle()) |terminal_title| {
+                self.setTitle(terminal_title, .user) catch |err| {
+                    log.err("failed to set title={}", .{err});
+                };
+                self.app.core_app.alloc.free(self.title_from_terminal.?);
+                self.title_from_terminal = null;
+            }
+        } else if (title.len > 0) {
+            // if this is the first time the user is setting the title, save the current terminal provided title
+            if (self.title_from_terminal == null and self.title_text != null) {
+                self.title_from_terminal = self.app.core_app.alloc.dupeZ(u8, self.title_text.?) catch |err| switch (err) {
+                    error.OutOfMemory => {
+                        log.err("failed to allocate memory for title={}", .{err});
+                        return;
+                    },
+                };
+            }
+
+            self.setTitle(title, .user) catch |err| {
+                log.err("failed to set title={}", .{err});
+            };
+        }
+    }
 }
