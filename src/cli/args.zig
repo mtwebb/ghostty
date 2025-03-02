@@ -8,6 +8,8 @@ const internal_os = @import("../os/main.zig");
 const Diagnostic = diags.Diagnostic;
 const DiagnosticList = diags.DiagnosticList;
 
+const log = std.log.scoped(.cli);
+
 // TODO:
 //   - Only `--long=value` format is accepted. Do we want to allow
 //     `--long value`? Not currently allowed.
@@ -38,6 +40,12 @@ pub const Error = error{
 /// "DiagnosticList" and any diagnostic messages will be added to that list.
 /// When diagnostics are present, only allocation errors will be returned.
 ///
+/// If the destination type has a decl "renamed", it must be of type
+/// std.StaticStringMap([]const u8) and contains a mapping from the old
+/// field name to the new field name. This is used to allow renaming fields
+/// while still supporting the old name. If a renamed field is set, parsing
+/// will automatically set the new field name.
+///
 /// Note: If the arena is already non-null, then it will be used. In this
 /// case, in the case of an error some memory might be leaked into the arena.
 pub fn parse(
@@ -48,6 +56,24 @@ pub fn parse(
 ) !void {
     const info = @typeInfo(T);
     assert(info == .Struct);
+
+    comptime {
+        // Verify all renamed fields are valid (source does not exist,
+        // destination does exist).
+        if (@hasDecl(T, "renamed")) {
+            for (T.renamed.keys(), T.renamed.values()) |key, value| {
+                if (@hasField(T, key)) {
+                    @compileLog(key);
+                    @compileError("renamed field source exists");
+                }
+
+                if (!@hasField(T, value)) {
+                    @compileLog(value);
+                    @compileError("renamed field destination does not exist");
+                }
+            }
+        }
+    }
 
     // Make an arena for all our allocations if we support it. Otherwise,
     // use an allocator that always fails. If the arena is already set on
@@ -221,16 +247,6 @@ pub fn parseIntoField(
 
     inline for (info.Struct.fields) |field| {
         if (field.name[0] != '_' and mem.eql(u8, field.name, key)) {
-            // If the value is empty string (set but empty string),
-            // then we reset the value to the default.
-            if (value) |v| default: {
-                if (v.len != 0) break :default;
-                const raw = field.default_value orelse break :default;
-                const ptr: *const field.type = @alignCast(@ptrCast(raw));
-                @field(dst, field.name) = ptr.*;
-                return;
-            }
-
             // For optional fields, we just treat it as the child type.
             // This lets optional fields default to null but get set by
             // the CLI.
@@ -238,11 +254,27 @@ pub fn parseIntoField(
                 .Optional => |opt| opt.child,
                 else => field.type,
             };
+            const fieldInfo = @typeInfo(Field);
+            const canHaveDecls = fieldInfo == .Struct or fieldInfo == .Union or fieldInfo == .Enum;
+
+            // If the value is empty string (set but empty string),
+            // then we reset the value to the default.
+            if (value) |v| default: {
+                if (v.len != 0) break :default;
+                // Set default value if possible.
+                if (canHaveDecls and @hasDecl(Field, "init")) {
+                    try @field(dst, field.name).init(alloc);
+                    return;
+                }
+                const raw = field.default_value orelse break :default;
+                const ptr: *const field.type = @alignCast(@ptrCast(raw));
+                @field(dst, field.name) = ptr.*;
+                return;
+            }
 
             // If we are a type that can have decls and have a parseCLI decl,
             // we call that and use that to set the value.
-            const fieldInfo = @typeInfo(Field);
-            if (fieldInfo == .Struct or fieldInfo == .Union or fieldInfo == .Enum) {
+            if (canHaveDecls) {
                 if (@hasDecl(Field, "parseCLI")) {
                     const fnInfo = @typeInfo(@TypeOf(Field.parseCLI)).Fn;
                     switch (fnInfo.params.len) {
@@ -364,6 +396,16 @@ pub fn parseIntoField(
             };
 
             return;
+        }
+    }
+
+    // Unknown field, is the field renamed?
+    if (@hasDecl(T, "renamed")) {
+        for (T.renamed.keys(), T.renamed.values()) |old, new| {
+            if (mem.eql(u8, old, key)) {
+                try parseIntoField(T, alloc, dst, new, value);
+                return;
+            }
         }
     }
 
@@ -723,6 +765,29 @@ test "parseIntoField: ignore underscore-prefixed fields" {
         parseIntoField(@TypeOf(data), alloc, &data, "_a", "42"),
     );
     try testing.expectEqualStrings("12", data._a);
+}
+
+test "parseIntoField: struct with init func" {
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var data: struct {
+        a: struct {
+            const Self = @This();
+
+            v: []const u8,
+
+            pub fn init(self: *Self, _alloc: Allocator) !void {
+                _ = _alloc;
+                self.* = .{ .v = "HELLO!" };
+            }
+        },
+    } = undefined;
+
+    try parseIntoField(@TypeOf(data), alloc, &data, "a", "");
+    try testing.expectEqual(@as([]const u8, "HELLO!"), data.a.v);
 }
 
 test "parseIntoField: string" {
@@ -1104,6 +1169,24 @@ test "parseIntoField: tagged union missing tag" {
     );
 }
 
+test "parseIntoField: renamed field" {
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var data: struct {
+        a: []const u8,
+
+        const renamed = std.StaticStringMap([]const u8).initComptime(&.{
+            .{ "old", "a" },
+        });
+    } = undefined;
+
+    try parseIntoField(@TypeOf(data), alloc, &data, "old", "42");
+    try testing.expectEqualStrings("42", data.a);
+}
+
 /// An iterator that considers its location to be CLI args. It
 /// iterates through an underlying iterator and increments a counter
 /// to track the current CLI arg index.
@@ -1206,9 +1289,11 @@ pub fn LineIterator(comptime ReaderType: type) type {
             const buf = buf: {
                 while (true) {
                     // Read the full line
-                    var entry = self.r.readUntilDelimiterOrEof(self.entry[2..], '\n') catch {
-                        // TODO: handle errors
-                        unreachable;
+                    var entry = self.r.readUntilDelimiterOrEof(self.entry[2..], '\n') catch |err| switch (err) {
+                        inline else => |e| {
+                            log.warn("cannot read from \"{s}\": {}", .{ self.filepath, e });
+                            return null;
+                        },
                     } orelse return null;
 
                     // Increment our line counter

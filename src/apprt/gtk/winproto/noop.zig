@@ -3,6 +3,7 @@ const Allocator = std.mem.Allocator;
 const c = @import("../c.zig").c;
 const Config = @import("../../../config.zig").Config;
 const input = @import("../../../input.zig");
+const ApprtWindow = @import("../Window.zig");
 
 const log = std.log.scoped(.winproto_noop);
 
@@ -28,14 +29,18 @@ pub const App = struct {
     ) ?input.Mods {
         return null;
     }
+
+    pub fn supportsQuickTerminal(_: App) bool {
+        return false;
+    }
+    pub fn initQuickTerminal(_: *App, _: *ApprtWindow) !void {}
 };
 
 pub const Window = struct {
     pub fn init(
         _: Allocator,
         _: *App,
-        _: *c.GtkWindow,
-        _: *const Config,
+        _: *ApprtWindow,
     ) !Window {
         return .{};
     }
@@ -47,12 +52,14 @@ pub const Window = struct {
 
     pub fn updateConfigEvent(
         _: *Window,
-        _: *const Config,
+        _: *const ApprtWindow.DerivedConfig,
     ) !void {}
 
     pub fn resizeEvent(_: *Window) !void {}
 
     pub fn syncAppearance(_: *Window) !void {}
+
+    pub fn syncQuickTerminal(_: *Window) !void {}
 
     /// This returns true if CSD is enabled for this window. This
     /// should be the actual present state of the window, not the
@@ -61,4 +68,6 @@ pub const Window = struct {
         _ = self;
         return true;
     }
+
+    pub fn addSubprocessEnv(_: *Window, _: *std.process.EnvMap) !void {}
 };

@@ -14,6 +14,7 @@
   python3,
   qemu,
   scdoc,
+  snapcraft,
   valgrind,
   #, vulkan-loader # unused
   vttest,
@@ -30,7 +31,10 @@
   glib,
   glslang,
   gtk4,
+  gtk4-layer-shell,
+  gobject-introspection,
   libadwaita,
+  blueprint-compiler,
   adwaita-icon-theme,
   hicolor-icon-theme,
   harfbuzz,
@@ -47,6 +51,7 @@
   simdutf,
   zlib,
   alejandra,
+  jq,
   minisign,
   pandoc,
   hyperfine,
@@ -54,6 +59,8 @@
   wayland,
   wayland-scanner,
   wayland-protocols,
+  zig2nix,
+  system,
 }: let
   # See package.nix. Keep in sync.
   rpathLibs =
@@ -82,7 +89,9 @@
 
       libadwaita
       gtk4
+      gtk4-layer-shell
       glib
+      gobject-introspection
       wayland
     ];
 in
@@ -92,6 +101,7 @@ in
     packages =
       [
         # For builds
+        jq
         llvmPackages_latest.llvm
         minisign
         ncurses
@@ -100,6 +110,7 @@ in
         scdoc
         zig
         zip
+        zig2nix.packages.${system}.zon2nix
 
         # For web and wasm stuff
         nodejs
@@ -129,6 +140,7 @@ in
         qemu
 
         gdb
+        snapcraft
         valgrind
         wraptest
 
@@ -154,9 +166,12 @@ in
         libXrandr
 
         # Only needed for GTK builds
+        blueprint-compiler
         libadwaita
         gtk4
+        gtk4-layer-shell
         glib
+        gobject-introspection
         wayland
         wayland-scanner
         wayland-protocols

@@ -5,6 +5,7 @@ const c = @import("c.zig").c;
 const Config = @import("../../config.zig").Config;
 const input = @import("../../input.zig");
 const key = @import("key.zig");
+const ApprtWindow = @import("Window.zig");
 
 pub const noop = @import("winproto/noop.zig");
 pub const x11 = @import("winproto/x11.zig");
@@ -58,6 +59,23 @@ pub const App = union(Protocol) {
             inline else => |*v| v.eventMods(device, gtk_mods),
         } orelse key.translateMods(gtk_mods);
     }
+
+    pub fn supportsQuickTerminal(self: App) bool {
+        return switch (self) {
+            inline else => |v| v.supportsQuickTerminal(),
+        };
+    }
+
+    /// Set up necessary support for the quick terminal that must occur
+    /// *before* the window-level winproto object is created.
+    ///
+    /// Only has an effect on the Wayland backend, where the gtk4-layer-shell
+    /// library is initialized.
+    pub fn initQuickTerminal(self: *App, apprt_window: *ApprtWindow) !void {
+        switch (self.*) {
+            inline else => |*v| try v.initQuickTerminal(apprt_window),
+        }
+    }
 };
 
 /// Per-Window state for the underlying windowing protocol.
@@ -74,8 +92,7 @@ pub const Window = union(Protocol) {
     pub fn init(
         alloc: Allocator,
         app: *App,
-        window: *c.GtkWindow,
-        config: *const Config,
+        apprt_window: *ApprtWindow,
     ) !Window {
         return switch (app.*) {
             inline else => |*v, tag| {
@@ -90,8 +107,7 @@ pub const Window = union(Protocol) {
                         try field.type.init(
                             alloc,
                             v,
-                            window,
-                            config,
+                            apprt_window,
                         ),
                     );
                 }
@@ -111,18 +127,15 @@ pub const Window = union(Protocol) {
         }
     }
 
-    pub fn updateConfigEvent(
-        self: *Window,
-        config: *const Config,
-    ) !void {
-        switch (self.*) {
-            inline else => |*v| try v.updateConfigEvent(config),
-        }
-    }
-
     pub fn syncAppearance(self: *Window) !void {
         switch (self.*) {
             inline else => |*v| try v.syncAppearance(),
+        }
+    }
+
+    pub fn syncQuickTerminal(self: *Window) !void {
+        switch (self.*) {
+            inline else => |*v| try v.syncQuickTerminal(),
         }
     }
 
@@ -130,5 +143,11 @@ pub const Window = union(Protocol) {
         return switch (self) {
             inline else => |v| v.clientSideDecorationEnabled(),
         };
+    }
+
+    pub fn addSubprocessEnv(self: *Window, env: *std.process.EnvMap) !void {
+        switch (self.*) {
+            inline else => |*v| try v.addSubprocessEnv(env),
+        }
     }
 };
