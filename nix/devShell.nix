@@ -35,11 +35,12 @@
   gobject-introspection,
   libadwaita,
   blueprint-compiler,
+  gettext,
   adwaita-icon-theme,
   hicolor-icon-theme,
   harfbuzz,
   libpng,
-  libGL,
+  libxkbcommon,
   libX11,
   libXcursor,
   libXext,
@@ -59,45 +60,20 @@
   wayland,
   wayland-scanner,
   wayland-protocols,
-  zig2nix,
+  zon2nix,
   system,
+  pkgs,
 }: let
   # See package.nix. Keep in sync.
-  rpathLibs =
-    [
-      libGL
-    ]
-    ++ lib.optionals stdenv.hostPlatform.isLinux [
-      bzip2
-      expat
-      fontconfig
-      freetype
-      harfbuzz
-      libpng
-      libxml2
-      oniguruma
-      simdutf
-      zlib
-
-      glslang
-      spirv-cross
-
-      libX11
-      libXcursor
-      libXi
-      libXrandr
-
-      libadwaita
-      gtk4
-      gtk4-layer-shell
-      glib
-      gobject-introspection
-      wayland
-    ];
+  ld_library_path = import ./build-support/ld-library-path.nix {
+    inherit pkgs lib stdenv;
+  };
+  gi_typelib_path = import ./build-support/gi-typelib-path.nix {
+    inherit pkgs lib stdenv;
+  };
 in
   mkShell {
     name = "ghostty";
-
     packages =
       [
         # For builds
@@ -110,7 +86,7 @@ in
         scdoc
         zig
         zip
-        zig2nix.packages.${system}.zon2nix
+        zon2nix.packages.${system}.zon2nix
 
         # For web and wasm stuff
         nodejs
@@ -129,6 +105,15 @@ in
         # wasm
         wabt
         wasmtime
+
+        # Localization
+        gettext
+
+        # We need these GTK-related deps on all platform so we can build
+        # dist tarballs.
+        blueprint-compiler
+        libadwaita
+        gtk4
       ]
       ++ lib.optionals stdenv.hostPlatform.isLinux [
         # My nix shell environment installs the non-interactive version
@@ -158,6 +143,7 @@ in
         glslang
         spirv-cross
 
+        libxkbcommon
         libX11
         libXcursor
         libXext
@@ -166,9 +152,6 @@ in
         libXrandr
 
         # Only needed for GTK builds
-        blueprint-compiler
-        libadwaita
-        gtk4
         gtk4-layer-shell
         glib
         gobject-introspection
@@ -179,7 +162,8 @@ in
 
     # This should be set onto the rpath of the ghostty binary if you want
     # it to be "portable" across the system.
-    LD_LIBRARY_PATH = lib.makeLibraryPath rpathLibs;
+    LD_LIBRARY_PATH = ld_library_path;
+    GI_TYPELIB_PATH = gi_typelib_path;
 
     shellHook =
       (lib.optionalString stdenv.hostPlatform.isLinux ''
@@ -196,5 +180,9 @@ in
         # and we need iOS too.
         unset SDKROOT
         unset DEVELOPER_DIR
+
+        # We need to remove "xcrun" from the PATH. It is injected by
+        # some dependency but we need to rely on system Xcode tools
+        export PATH=$(echo "$PATH" | awk -v RS=: -v ORS=: '$0 !~ /xcrun/ || $0 == "/usr/bin" {print}' | sed 's/:$//')
       '');
   }
